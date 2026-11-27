@@ -269,3 +269,67 @@ def parse_sbox(text):
     if any(v < 0 or v > 255 for v in vals):
         raise ValueError("Semua nilai harus di antara 0 dan 255.")
     return np.array(vals, dtype=np.int64)
+
+
+# ---------------- Pembanding: algoritma genetika ----------------
+def genetic_algorithm(init_mats, pop_size=60, generations=150, elit=2, tour=3, pc=0.9, pm=1 / 64, seed=0,
+                      progress=None):
+    """Cari matriks affine dengan GA. Fitness = deviasi SAC (seri: |SAC rata-rata - 0,5|)."""
+    rng = np.random.default_rng(seed)
+
+    def fit_of(A):
+        s = sac(build_sbox(A))
+        return (s["deviasi"], abs(s["avg"] - 0.5))
+
+    def repair(A):
+        A = A.copy()
+        while gf2_rank(A) != 8:
+            i, j = rng.integers(0, 8, 2)
+            A[i, j] ^= 1
+        return A
+
+    def pick(pop, fit):
+        idx = rng.choice(len(pop), tour, replace=False)
+        return pop[min(idx, key=lambda i: fit[i])]
+
+    pop = [init_mats[i].copy() for i in rng.choice(len(init_mats), pop_size, replace=False)]
+    fit = [fit_of(A) for A in pop]
+    history = []
+    for g in range(generations):
+        order = np.argsort([f[0] + f[1] * 1e-3 for f in fit])
+        new = [pop[i].copy() for i in order[:elit]]
+        while len(new) < pop_size:
+            p1, p2 = pick(pop, fit), pick(pop, fit)
+            child = np.where((rng.random(8) < 0.5)[:, None], p1, p2) if rng.random() < pc else p1.copy()
+            child = child ^ (rng.random((8, 8)) < pm)
+            new.append(repair(child.astype(np.int64)))
+        pop, fit = new, [fit_of(A) for A in new]
+        history.append(min(f[0] for f in fit))
+        if progress:
+            progress((g + 1) / generations)
+    best = min(range(pop_size), key=lambda i: fit[i])
+    return {"A": pop[best], "sbox": build_sbox(pop[best]), "deviasi": fit[best][0], "history": history}
+
+
+def dataset_from_image(img):
+    bitstream = np.concatenate([(img >> p) & 1 for p in (0, 1)]).reshape(-1)
+    n = len(bitstream) // 64 * 64
+    return np.array([A for A in bitstream[:n].reshape(-1, 8, 8).astype(np.int64) if gf2_rank(A) == 8])
+
+
+def optimum_sac_deviation():
+    """Deviasi SAC minimum teoretis untuk konstruksi invers GF(2^8) + affine."""
+    x = np.arange(256)
+    kontribusi = np.zeros(256)
+    for r in range(1, 256):
+        kontribusi[r] = np.mean([abs((BITS[(INV ^ INV[x ^ (1 << i)]) & r].sum(1) % 2).mean() - 0.5)
+                                 for i in range(8)])
+    rows = []
+    for r in np.argsort(kontribusi):
+        if r == 0:
+            continue
+        if gf2_rank(BITS[rows + [r]]) == len(rows) + 1:
+            rows.append(r)
+        if len(rows) == 8:
+            break
+    return float(kontribusi[rows].mean())

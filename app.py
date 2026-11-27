@@ -51,6 +51,16 @@ def run_ml(img):
     return _run_ml(img, digest(img))
 
 
+@st.cache_data(show_spinner=False)
+def dataset_cached(_img, img_digest):
+    return sc.dataset_from_image(_img)
+
+
+@st.cache_data(show_spinner=False)
+def optimum_cached():
+    return sc.optimum_sac_deviation()
+
+
 @st.cache_data(show_spinner=False, max_entries=8)
 def _encrypt_cached(_img, img_digest, key, iv, sbox_tuple, two_way):
     return ac.encrypt_image(_img, key, iv, list(sbox_tuple), two_way)
@@ -140,7 +150,7 @@ Aplikasi ini menampilkan hasil proyek akhir mata kuliah Kriptografi:
 
 1. **Konstruksi S-box (ML)** — S-box dibangun dengan rumus $S(x) = A \\cdot x^{-1} \\oplus \\texttt{0x63}$ di GF(2⁸)
    (polinomial irreducible `0x1F3`). Matriks affine $A$ dipilih oleh model **Ridge Regression** yang dilatih dari
-   7.122 kandidat matriks hasil bit-plane citra mandrill.
+   7.122 kandidat matriks hasil bit-plane citra mandrill. Algoritma genetika disediakan sebagai pembanding.
 2. **Uji S-box** — balance, bijective, nonlinearity, SAC, BIC-NL, BIC-SAC, LAP, DAP, dan fixed point,
    dibandingkan dengan S-box AES dan S-box penelitian acuan.
 3. **Enkripsi Citra** — S-box dipasang di AES-128 (mode CBC dua arah), lalu diuji dengan histogram,
@@ -214,6 +224,55 @@ direpresentasikan sebagai jumlah kemunculan tiap nilai baris (vektor 256 dimensi
         st.success(f"Deviasi SAC: {dev:.5f} (terbaik di dataset tanpa ML: {r['best_dataset_dev']:.5f}). "
                    + ("Sama dengan S-box ML kelompok." if list(r["sbox"]) == sc.SBOX_ML else ""))
         st.download_button("Unduh S-box (.txt)", ", ".join(map(str, r["sbox"])), file_name="sbox_ml.txt")
+
+    # ---------- Pembanding: algoritma genetika ----------
+    st.divider()
+    st.header("Pembanding: Algoritma Genetika")
+    st.markdown(
+        """
+Matriks affine juga dicari dengan **algoritma genetika (GA)** sebagai pembanding. Kromosom = matriks affine 8×8,
+populasi awal diambil dari dataset mandrill, fitness = deviasi SAC, seleksi turnamen (k = 3), crossover per baris
+(peluang 0,9), mutasi flip bit (peluang 1/64), elitisme 2, dan anak yang tidak invertible diperbaiki dengan mutasi ulang.
+        """
+    )
+    c = st.columns(3)
+    pop_size = c[0].number_input("Ukuran populasi", 10, 200, 60, step=10)
+    generations = c[1].number_input("Jumlah generasi", 10, 500, 150, step=10)
+    seed = c[2].number_input("Seed", 0, 9999, 1)
+    if st.button("Jalankan algoritma genetika"):
+        bar = st.progress(0.0, text="Menjalankan GA...")
+        t = time.time()
+        init = dataset_cached(img_src, digest(img_src))
+        st.session_state["ga"] = sc.genetic_algorithm(init, int(pop_size), int(generations), seed=int(seed),
+                                                      progress=lambda p: bar.progress(p, text=f"Generasi {int(p * generations)}/{generations}"))
+        st.session_state["ga_time"] = time.time() - t
+        bar.empty()
+
+    if "ga" in st.session_state:
+        g = st.session_state["ga"]
+        dev_ml = sc.sac(sc.SBOX_ML)["deviasi"]
+        dev_opt = optimum_cached()
+        fig, ax = plt.subplots(figsize=(8, 3.4))
+        ax.plot(range(1, len(g["history"]) + 1), g["history"], label="GA (deviasi SAC terbaik)")
+        ax.axhline(dev_ml, color="red", ls="--", lw=1.2, label=f"Ridge (ML) = {dev_ml:.5f}")
+        ax.set_xlabel("Generasi"); ax.set_ylabel("Deviasi SAC"); ax.legend(); ax.grid(alpha=.3)
+        fig.tight_layout()
+        st.pyplot(fig)
+        c = st.columns(4)
+        c[0].metric("Deviasi SAC GA", f"{g['deviasi']:.5f}")
+        c[1].metric("Deviasi SAC Ridge (ML)", f"{dev_ml:.5f}")
+        c[2].metric("Optimum teoretis", f"{dev_opt:.5f}")
+        c[3].metric("Waktu GA", f"{st.session_state['ga_time']:.1f} s")
+        if abs(g["deviasi"] - dev_opt) < 1e-9:
+            st.success("GA pada run ini berhasil mencapai nilai optimum, sama dengan Ridge.")
+        else:
+            st.info("GA belum mencapai nilai optimum pada run ini. Ridge Regression mencapainya secara langsung "
+                    "dan hasilnya selalu sama setiap dijalankan, sedangkan hasil GA bergantung pada seed.")
+        with st.expander("Matriks affine dan S-box hasil GA"):
+            st.dataframe(pd.DataFrame(g["A"], columns=[f"k{j}" for j in range(8)]))
+            st.dataframe(sbox_df(g["sbox"]), height=600)
+            m = metrics_cached(tuple(int(v) for v in g["sbox"]))
+            st.write({k: m[k] for k in ["Balance", "Bijective", "NL", "SAC", "Deviasi SAC"]})
 
 
 # ---------------- Uji S-box ----------------
